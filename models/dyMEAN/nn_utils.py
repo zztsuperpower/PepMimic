@@ -240,7 +240,7 @@ class SeparatedAminoAcidFeature(AminoAcidFeature):
         atom_pos = self.residue_atom_pos[S]     # [N, n_channel]
 
         # residue embedding
-        pos_embedding = self.aa_embedding.res_pos_embedding(position_ids) if self.aa_embedding.max_position > 0 else 0
+        pos_embedding = self.aa_embedding.res_pos_embedding(position_ids) # if self.aa_embedding.max_position > 0 else 0
         H = self.aa_embedding.residue_embedding(S)
         if smooth_prob is not None:
             res_embeddings = self.aa_embedding.residue_embedding(

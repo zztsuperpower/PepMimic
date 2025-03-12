@@ -89,8 +89,11 @@ class MMAPDataset(torch.utils.data.Dataset):
                 messages = line.strip().split('\t')
                 _id, start, end = messages[:3]
                 _property = messages[3:]
-                self._indexes.append((_id, int(start), int(end)))
-                self._properties.append(_property)
+                try:
+                    self._indexes.append((_id, int(start), int(end)))
+                    self._properties.append(_property)
+                except:
+                    continue
         _data_path = os.path.join(mmap_dir, 'data.bin') if specify_data is None else specify_data
         self._data_file = open(_data_path, 'rb')
         self._mmap = mmap.mmap(self._data_file.fileno(), 0, access=mmap.ACCESS_READ)

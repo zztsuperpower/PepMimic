@@ -12,7 +12,7 @@ from utils import register as R
 from utils.oom_decorator import oom_decorator
 from utils.nn_utils import variadic_meshgrid
 
-from ..LDM.ldm import LDMPepDesign
+from ..LDM.ldm import LDMPepDesign #LDMPepDesign
 from ..dyMEAN.modules.am_egnn import AMEGNN # adaptive-multichannel egnn
 from .ept import EPT
 

@@ -53,41 +53,42 @@ class LDMTrainer(Trainer):
         self.log('Overall/Loss/Validation', loss, batch_idx, val=True)
         if 'H' in loss_dict: self.log('Seq/Loss_H/Validation', loss_dict['H'], batch_idx, val=True)
         if 'X' in loss_dict: self.log('Struct/Loss_X/Validation', loss_dict['X'], batch_idx, val=True)
+        return loss.detach()
         # disable sidechain optimization as it may stuck for early validations where the model is still weak
-        if self.local_rank != -1:  # ddp
-            sample_X, sample_S, _ = self.model.module.sample(**batch, return_tensor=True, optimize_sidechain=False)
-        else:
-            sample_X, sample_S, _ = self.model.sample(**batch, return_tensor=True, optimize_sidechain=False)
-        mask_generate = batch['mask']
-        # batch ids
-        batch_ids = torch.zeros_like(mask_generate).long()
-        batch_ids[torch.cumsum(batch['lengths'], dim=0)[:-1]] = 1
-        batch_ids.cumsum_(dim=0)
-        batch_ids = batch_ids[mask_generate]
+        # if self.local_rank != -1:  # ddp
+        #     sample_X, sample_S, _ = self.model.module.sample(**batch, return_tensor=True, optimize_sidechain=False)
+        # else:
+        #     sample_X, sample_S, _ = self.model.sample(**batch, return_tensor=True, optimize_sidechain=False)
+        # mask_generate = batch['mask']
+        # # batch ids
+        # batch_ids = torch.zeros_like(mask_generate).long()
+        # batch_ids[torch.cumsum(batch['lengths'], dim=0)[:-1]] = 1
+        # batch_ids.cumsum_(dim=0)
+        # batch_ids = batch_ids[mask_generate]
 
-        if sample_S is not None:
-            # aar
-            aar = (batch['S'][mask_generate] == sample_S).float()
-            aar = torch.mean(scatter_mean(aar, batch_ids, dim=-1))
-            self.log('Seq/AAR/Validation', aar, batch_idx, val=True)
+        # if sample_S is not None:
+        #     # aar
+        #     aar = (batch['S'][mask_generate] == sample_S).float()
+        #     aar = torch.mean(scatter_mean(aar, batch_ids, dim=-1))
+        #     self.log('Seq/AAR/Validation', aar, batch_idx, val=True)
 
-        # ca rmsd
-        if sample_X is not None:
-            atom_mask = batch['atom_mask'][mask_generate][:, 1]
-            rmsd = ((batch['X'][mask_generate][:, 1][atom_mask] - sample_X[:, 1][atom_mask]) ** 2).sum(-1)  # [Ntgt]
-            rmsd = torch.sqrt(scatter_mean(rmsd, batch_ids[atom_mask], dim=-1))  # [bs]
-            rmsd = torch.mean(rmsd)
+        # # ca rmsd
+        # if sample_X is not None:
+        #     atom_mask = batch['atom_mask'][mask_generate][:, 1]
+        #     rmsd = ((batch['X'][mask_generate][:, 1][atom_mask] - sample_X[:, 1][atom_mask]) ** 2).sum(-1)  # [Ntgt]
+        #     rmsd = torch.sqrt(scatter_mean(rmsd, batch_ids[atom_mask], dim=-1))  # [bs]
+        #     rmsd = torch.mean(rmsd)
 
-            self.log('Struct/CA_RMSD/Validation', rmsd, batch_idx, val=True)
+        #     self.log('Struct/CA_RMSD/Validation', rmsd, batch_idx, val=True)
 
-        if self.criterion == 'AAR':
-            return aar.detach()
-        elif self.criterion == 'RMSD':
-            return rmsd.detach()
-        elif self.criterion == 'Loss':
-            return loss.detach()
-        else:
-            raise NotImplementedError(f'Criterion {self.criterion} not implemented')
+        # if self.criterion == 'AAR':
+        #     return aar.detach()
+        # elif self.criterion == 'RMSD':
+        #     return rmsd.detach()
+        # elif self.criterion == 'Loss':
+        #     return loss.detach()
+        # else:
+        #     raise NotImplementedError(f'Criterion {self.criterion} not implemented')
 
     def _train_epoch_end(self, device):
         dataset = self.train_loader.dataset

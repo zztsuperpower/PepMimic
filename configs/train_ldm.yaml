@@ -53,8 +53,9 @@ model:
   n_layers: 3
   n_rbf: 32
   cutoff: 3.0 # the coordinates are in standard space
+  dist_rbf: 32
   diffusion_opt:
     trans_seq_type: Diffusion
     trans_pos_type: Diffusion
 
-load_ckpt: ""
+

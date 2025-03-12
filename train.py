@@ -29,6 +29,7 @@ def parse():
     # config
     parser.add_argument('--config', type=str, required=True, help='Path to the yaml configure')
     parser.add_argument('--seed', type=int, default=SEED, help='Random seed')
+    parser.add_argument('--load_ckpt', type=str, help='load_ckpt')
 
     return parser.parse_known_args()
 

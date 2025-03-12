@@ -110,6 +110,7 @@ class LDMPepDesign(nn.Module):
         loss_dict = self.diffusion.forward(
             H_0=H_0,
             X_0=X,
+            S = S,
             position_embedding=position_embedding,
             mask_generate=mask,
             lengths=lengths,
@@ -207,13 +208,14 @@ class LDMPepDesign(nn.Module):
 
         sample_opt['sample_sequence'] = self.train_sequence
         sample_opt['sample_structure'] = self.train_structure
+
         if 'energy_func' in sample_opt:
             if sample_opt['energy_func'] is None:
                 pass
             elif sample_opt['energy_func'] == 'default':
                 sample_opt['energy_func'] = self.latent_geometry_guidance
             # otherwise this should be a function
-        
+
         traj = self.diffusion.sample(H_0, X, position_embedding, mask, lengths, atom_embeddings, atom_mask, L, guide_mask=guide_mask, **sample_opt)
         X_0, H_0 = traj[0]
         if use_confidence:

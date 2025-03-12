@@ -4,17 +4,26 @@ import torch.nn.functional as F
 import functools
 from tqdm.auto import tqdm
 import numpy as np
+import random 
 
 from torch.autograd import grad
 from torch_scatter import scatter_mean
 
 from utils.nn_utils import variadic_meshgrid
 
+from .sample_utils import condition_stapled, condition_head2tail
 from .transition import construct_transition
 from .vlb import normal_kl, mean_flat, discretized_gaussian_log_likelihood
 
 from ...dyMEAN.modules.am_egnn import AMEGNN
 from ...dyMEAN.modules.radial_basis import RadialBasis
+
+
+SAMPLE_METHODS = {
+    "KD": condition_stapled,
+    "head2tail": condition_head2tail,
+}
+
 
 
 def low_trianguler_inv(L):
@@ -51,7 +60,7 @@ class EpsilonNet(nn.Module):
         edge_embed_size = hidden_size // 4
         pos_embed_size, seg_embed_size = input_size, input_size
         # enc_input_size = input_size + seg_embed_size + 3 + (pos_embed_size if additional_pos_embed else 0)
-        enc_input_size = input_size + 3 + (pos_embed_size if additional_pos_embed else 0)
+        enc_input_size = input_size + 3 + (pos_embed_size if additional_pos_embed else 0) + 20 # for one-hot type constraint encoding
         self.encoder = AMEGNN(
             enc_input_size, hidden_size, hidden_size, n_channel,
             channel_nf=atom_embed_size, radial_nf=hidden_size,
@@ -63,7 +72,8 @@ class EpsilonNet(nn.Module):
         self.edge_embedding = nn.Embedding(2, edge_embed_size)
 
     def forward(
-            self, H_noisy, X_noisy, position_embedding, ctx_edges, inter_edges,
+            self, H_noisy, X_noisy, guidance_node_attr, guidance_edges, guidance_edge_attr,
+            position_embedding, ctx_edges, inter_edges,
             atom_embeddings, atom_weights, mask_generate, beta,
             ctx_edge_attr=None, inter_edge_attr=None
         ):
@@ -82,10 +92,10 @@ class EpsilonNet(nn.Module):
         # seg_embed = self.segment_embedding(mask_generate.long())
         if position_embedding is None:
             # in_feat = torch.cat([H_noisy, t_embed, seg_embed], dim=-1) # [N, hidden_size * 2 + 3]
-            in_feat = torch.cat([H_noisy, t_embed], dim=-1) # [N, hidden_size * 2 + 3]
+            in_feat = torch.cat([H_noisy, t_embed, guidance_node_attr], dim=-1) # [N, hidden_size * 2 + 3]
         else:
             # in_feat = torch.cat([H_noisy, t_embed, self.pos_embed2latent(position_embedding), seg_embed], dim=-1) # [N, hidden_size * 3 + 3]
-            in_feat = torch.cat([H_noisy, t_embed, position_embedding], dim=-1) # [N, hidden_size * 3 + 3]
+            in_feat = torch.cat([H_noisy, t_embed, guidance_node_attr, position_embedding], dim=-1) # [N, hidden_size * 3 + 3]
         edges = torch.cat([ctx_edges, inter_edges], dim=-1)
         edge_embed = torch.cat([
             torch.zeros_like(ctx_edges[0]), torch.ones_like(inter_edges[0]) # [E]
@@ -98,7 +108,11 @@ class EpsilonNet(nn.Module):
                 edge_embed,
                 torch.cat([ctx_edge_attr, inter_edge_attr], dim=0)
             ], dim=-1) # [E, embed size + edge_attr_size]
-        next_H, next_X = self.encoder(in_feat, X_noisy, edges, ctx_edge_attr=edge_attr, channel_attr=atom_embeddings, channel_weights=atom_weights)
+        next_H, next_X = self.encoder(
+                                        in_feat, X_noisy, edges, ctx_edge_attr=edge_attr, 
+                                        channel_attr=atom_embeddings, channel_weights=atom_weights, 
+                                        guidance_edges=guidance_edges, guidance_edge_attr=guidance_edge_attr
+                                    )
 
         # equivariant vector features changes
         eps_X = next_X - X_noisy
@@ -139,11 +153,14 @@ class FullDPM(nn.Module):
         )
         if dist_rbf > 0:
             self.dist_rbf = RadialBasis(dist_rbf, 10.0)
+            self.guidance_dist_rbf = RadialBasis(dist_rbf, 20.0)
+
         self.num_steps = num_steps
         self.trans_x = construct_transition(trans_pos_type, num_steps, trans_pos_opt)
         self.trans_h = construct_transition(trans_seq_type, num_steps, trans_seq_opt)
 
         self.register_buffer('std', torch.tensor(std, dtype=torch.float))
+
 
     def _normalize_position(self, X, batch_ids, mask_generate, atom_mask, L=None):
         ctx_mask = (~mask_generate[:, None].expand_as(atom_mask)) & atom_mask
@@ -177,8 +194,100 @@ class FullDPM(nn.Module):
 
         return batch_ids
 
+    @staticmethod
     @torch.no_grad()
-    def _get_edges(self, mask_generate, batch_ids, lengths):
+    def _sample_random_edges(mask_generate):
+        '''
+        randomly sample edges for cfg training
+        '''
+        
+        def find_consecutive_groups(tensor):
+            groups = []
+            group = [tensor[0]]
+            for i in range(1, len(tensor)):
+                if tensor[i] == tensor[i-1] + 1:
+                    group.append(tensor[i])
+                else:
+                    groups.append(group)
+                    group = [tensor[i]]
+            groups.append(group)  
+            return groups
+
+        def sample_from_groups(groups):
+            sampled = []
+            for group in groups:
+                if random.random() > 0.5:
+                    continue
+                num_to_sample = random.randint(0, max(1, len(group) // 2)) 
+                sampled += random.sample(group, num_to_sample)
+            return sampled
+        
+        sampled_edges = []
+        
+        for k in range(2, 7, 1): # we consider distance constraint from A*A to A*****A
+            shifted_tensor = torch.roll(mask_generate, shifts=-k)  
+            shifted_tensor[-k:] = False
+            inner_positions = mask_generate & shifted_tensor  
+            inner_positions = torch.nonzero(inner_positions).squeeze()
+
+            if inner_positions is None:
+                continue 
+
+            groups = find_consecutive_groups(inner_positions)
+            sampled_numbers = sample_from_groups(groups)
+
+            if len(sampled_numbers)==0:
+                continue
+
+            inner_positions1 = []
+            inner_positions2 = []
+            for sampled_number in sampled_numbers:
+                if sampled_number+k > len(mask_generate)-1:
+                    continue
+                inner_positions1.append(sampled_number)
+                inner_positions2.append(sampled_number+k)
+
+            inner_positions1 = torch.stack(inner_positions1)
+            inner_positions2 = torch.stack(inner_positions2)
+            inner_edges = torch.stack([inner_positions1, inner_positions2], dim=0)
+            reversed_inner_edges = inner_edges.flip(0)
+
+            sampled_edges.append(inner_edges)
+            sampled_edges.append(reversed_inner_edges)
+        
+        try:
+            augmented_edges = torch.cat(sampled_edges, dim=1)
+        except:
+            return None
+
+        return augmented_edges 
+
+
+    @staticmethod
+    @torch.no_grad()
+    def _sample_random_nodes(batch_ids, mask_generate):
+        '''
+        randomly sample amino acids for cfg training
+        '''
+    
+        # get start positions for all peptides in a batch
+        unique_vals = torch.unique(batch_ids)
+        sampled_indices = []
+
+        for val in unique_vals:
+            if random.random() > 0.5:
+                valid_indices = (batch_ids == val) & mask_generate
+                indices = valid_indices.nonzero(as_tuple=True)[0]
+                sampled = indices[torch.randint(0, indices.size(0), (random.randint(1, min(4, len(indices))),))]  
+                sampled_indices += sampled
+        if sampled_indices:
+            return  torch.tensor(sampled_indices)
+        else:
+            return []
+    
+
+    @torch.no_grad()
+    def _get_edges(self, mask_generate, batch_ids, lengths, sample_random_edges=True):
         row, col = variadic_meshgrid(
             input1=torch.arange(batch_ids.shape[0], device=batch_ids.device),
             size1=lengths,
@@ -190,6 +299,10 @@ class FullDPM(nn.Module):
         is_inter = ~is_ctx
         ctx_edges = torch.stack([row[is_ctx], col[is_ctx]], dim=0) # [2, Ec]
         inter_edges = torch.stack([row[is_inter], col[is_inter]], dim=0) # [2, Ei]
+        if sample_random_edges:
+            augmented_edges = FullDPM._sample_random_edges(mask_generate)
+            return ctx_edges, inter_edges, augmented_edges
+        
         return ctx_edges, inter_edges
 
     @torch.no_grad()
@@ -208,7 +321,7 @@ class FullDPM(nn.Module):
 
 
     def forward(
-            self, H_0, X_0, position_embedding, mask_generate, lengths, atom_embeddings, atom_mask,
+            self, H_0, X_0, S, position_embedding, mask_generate, lengths, atom_embeddings, atom_mask,
         L=None, t=None, sample_structure=True, sample_sequence=True, return_states=False, batch_reduction=True):
         # if L is not None:
         #     L = L / self.std
@@ -229,20 +342,34 @@ class FullDPM(nn.Module):
         else:
             H_noisy, eps_H = H_0, torch.zeros_like(H_0)
 
-        ctx_edges, inter_edges = self._get_edges(mask_generate, batch_ids, lengths)
+        ctx_edges, inter_edges, guidance_edges = self._get_edges(mask_generate, batch_ids, lengths)
+
         if hasattr(self, 'dist_rbf'):
             ctx_edge_attr = self._get_edge_dist(self._unnormalize_position(X_noisy, centers, batch_ids, L), ctx_edges, atom_mask)
             inter_edge_attr = self._get_edge_dist(self._unnormalize_position(X_noisy, centers, batch_ids, L), inter_edges, atom_mask)
+            guidance_edge_attr = self._get_edge_dist(X_0, guidance_edges, atom_mask)
             ctx_edge_attr = self.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
             inter_edge_attr = self.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
+            guidance_edge_attr = self.guidance_dist_rbf(guidance_edge_attr).view(guidance_edges.shape[1], -1)   
         else:
-            ctx_edge_attr, inter_edge_attr = None, None
+            ctx_edge_attr, inter_edge_attr, guidance_edge_attr = None, None, None
+
+        
+        sampled_indices = self._sample_random_nodes(batch_ids, mask_generate)
+        guidance_node_attr = torch.zeros(S.shape[0], 20).to(S.device)
+        if len(sampled_indices) >= 1:
+            selected_AA = S[sampled_indices]
+            one_hot_encoded = F.one_hot(selected_AA, num_classes=20)
+            one_hot_encoded = one_hot_encoded.float()
+            guidance_node_attr[sampled_indices] = one_hot_encoded
 
         # beta = self.trans_x.var_sched.betas[t][batch_ids] # [N]
         beta = self.trans_x.get_timestamp(t)[batch_ids]  # [N]
+
         eps_H_pred, eps_X_pred = self.eps_net(
-            H_noisy, X_noisy, position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
-            ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr
+            H_noisy, X_noisy, guidance_node_attr, guidance_edges, guidance_edge_attr,
+            position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
+            ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
         )
 
         if return_states:
@@ -284,7 +411,7 @@ class FullDPM(nn.Module):
     @torch.no_grad()
     def sample(self, H, X, position_embedding, mask_generate, lengths, atom_embeddings, atom_mask,
         L=None, sample_structure=True, sample_sequence=True, pbar=False, energy_func=None, energy_lambda=0.01,
-        guide_mask=None
+        guide_mask=None, specific_sample_condition=None
     ):
         """
         Args:
@@ -318,6 +445,16 @@ class FullDPM(nn.Module):
         else:
             H_init = H
 
+        # perform sampling
+        if specific_sample_condition == None:
+            pass
+        elif specific_sample_condition not in SAMPLE_METHODS.keys():
+            raise NotImplementedError(f"Sampling methods {specific_sample_condition} not implemented!")
+        else:
+            process_func = SAMPLE_METHODS.get(specific_sample_condition)
+            guidance_node_attr, guidance_edges = process_func(batch_ids, mask_generate)
+
+    
         # traj = {self.num_steps: (self._unnormalize_position(X_init, centers, batch_ids, L), H_init)}
         traj = {self.num_steps: (X_init, H_init)}
         if pbar:
@@ -334,19 +471,38 @@ class FullDPM(nn.Module):
             beta = self.trans_x.get_timestamp(t).view(1).repeat(X_t.shape[0])
             t_tensor = torch.full([X_t.shape[0], ], fill_value=t, dtype=torch.long, device=X_t.device)
 
-            ctx_edges, inter_edges = self._get_edges(mask_generate, batch_ids, lengths)
+            ctx_edges, inter_edges = self._get_edges(mask_generate, batch_ids, lengths, sample_random_edges=False)
+
             if hasattr(self, 'dist_rbf'):
                 ctx_edge_attr = self._get_edge_dist(self._unnormalize_position(X_t, centers, batch_ids, L), ctx_edges, atom_mask)
                 inter_edge_attr = self._get_edge_dist(self._unnormalize_position(X_t, centers, batch_ids, L), inter_edges, atom_mask)
+                guidance_edge_attr = self._get_edge_dist(X_t, guidance_edges, atom_mask)
                 ctx_edge_attr = self.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
                 inter_edge_attr = self.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
+                guidance_edge_attr = self.guidance_dist_rbf(guidance_edge_attr).view(guidance_edges.shape[1], -1)   
             else:
-                ctx_edge_attr, inter_edge_attr = None, None
+                ctx_edge_attr, inter_edge_attr, guidance_edge_attr = None, None
 
-            eps_H, eps_X = self.eps_net(
-                H_t, X_t, position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
-                ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr
+            # with guidance
+            w_eps_H, w_eps_X = self.eps_net(
+                H_t, X_t, guidance_node_attr, guidance_edges, guidance_edge_attr,
+                position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
+                ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
             )
+
+            # without guidance
+            guidance_node_attr = torch.zeros_like(guidance_node_attr)
+            eps_H, eps_X = self.eps_net(
+                H_t, X_t, guidance_node_attr, None, None,
+                position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
+                ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
+            )
+
+            # perform cfg guidance
+            eps_H = (1 + self.w) * w_eps_H - self.w*eps_H
+            eps_X = (1 + self.w) * w_eps_X - self.w*eps_X
+            
+
             if energy_func is not None:
                 with torch.enable_grad():
                     cur_X_state = X_t.clone()
@@ -521,3 +677,17 @@ class FullDPM(nn.Module):
         #     "prior_bpd": prior_bpd,
         #     "vb": vb,
         # }
+
+
+if __name__ == '__main__':
+
+    bacth_ids = torch.tensor([0 for i in range(19)] + [1 for i in range(7)])
+    mask_generate = torch.tensor(
+        [False, False, False, False, False, False, 
+        True,  True,  True,  True,  True,  True,  True, True,  True,  True,  True,  True,  True, 
+        False, False,  True,  True,  True,  True,  True]
+    ) # pocket1 (6, 13) pocket2 (2, 5) edge (6, 19) (21, 26)
+
+    aug_edges = FullDPM._sample_random_edges(mask_generate)
+    print(aug_edges.shape, aug_edges)
+    print(FullDPM._sample_random_nodes(bacth_ids, mask_generate))

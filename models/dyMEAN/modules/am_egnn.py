@@ -64,12 +64,17 @@ class AMEGNN(nn.Module):
                 self.hidden_nf, self.hidden_nf, self.hidden_nf, n_channel, channel_nf, radial_nf,
                 edges_in_d=in_edge_nf, act_fn=act_fn, residual=residual, dropout=dropout, n_rbf=n_rbf, cutoff=cutoff
             ))
+            self.add_module(f'guidance_gcl_{i}', AM_E_GCL(
+                self.hidden_nf, self.hidden_nf, self.hidden_nf, n_channel, channel_nf, radial_nf,
+                edges_in_d=in_edge_nf//2, act_fn=act_fn, residual=residual, dropout=dropout, n_rbf=n_rbf, cutoff=cutoff
+            ))  # adator for guidance
+
         self.out_layer = AM_E_GCL(
             self.hidden_nf, self.hidden_nf, self.hidden_nf, n_channel, channel_nf,
             radial_nf, edges_in_d=in_edge_nf, act_fn=act_fn, residual=residual, n_rbf=n_rbf, cutoff=cutoff
         )
     
-    def forward(self, h, x, edges, channel_attr, channel_weights, ctx_edge_attr=None, x_update_mask=None):
+    def forward(self, h, x, edges, channel_attr, channel_weights, ctx_edge_attr=None, x_update_mask=None,  guidance_edges=None, guidance_edge_attr=None):
         h = self.linear_in(h)
         h = self.dropout(h)
 
@@ -78,6 +83,10 @@ class AMEGNN(nn.Module):
             h, x = self._modules[f'gcl_{i}'](
                 h, edges, x, channel_attr, channel_weights,
                 edge_attr=ctx_edge_attr, x_update_mask=x_update_mask)
+            if guidance_edges is not None:
+                h, x = self._modules[f'guidance_gcl_{i}'](
+                    h, guidance_edges, x, channel_attr, channel_weights,
+                    edge_attr=guidance_edge_attr, x_update_mask=x_update_mask)
 
             ctx_states.append(h)
             ctx_coords.append(x)

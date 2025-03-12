@@ -45,3 +45,11 @@ clustalw-2.1-linux-x86_64-libcppstatic
 figures/data
 
 figures/images
+
+scripts/test.sh
+
+launch.json
+
+nohup.out
+
+tmp.py
