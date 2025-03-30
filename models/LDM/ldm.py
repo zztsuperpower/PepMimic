@@ -81,6 +81,7 @@ class LDMPepDesign(nn.Module):
 
         # diffusion model
         if self.train_sequence:
+            S_ori = S.clone()
             S = S.clone()
             S[mask] = self.latent_idx
 
@@ -110,7 +111,7 @@ class LDMPepDesign(nn.Module):
         loss_dict = self.diffusion.forward(
             H_0=H_0,
             X_0=X,
-            S = S,
+            S=S_ori,
             position_embedding=position_embedding,
             mask_generate=mask,
             lengths=lengths,
