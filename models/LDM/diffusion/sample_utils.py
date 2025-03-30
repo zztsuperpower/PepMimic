@@ -14,14 +14,15 @@ def condition_stapled(batch_ids,mask_generate):
     for val in unique_vals:
         valid_indices = (batch_ids == val) & mask_generate
         indices = valid_indices.nonzero(as_tuple=True)[0]
-        if len(indices)<5:
+        if len(indices) < 5:
             continue
         random_indices = indices[(max(indices)-indices>=4)]
-        indice = random.choice(random_indices)
+
+        indice = random_indices[0] # random.choice(random_indices)
         hop = random.choice([3,4])
-        sampled = [indice,indice+hop]
+        sampled = [indice, indice + hop]
         positions1.append(indice)
-        positions2.append(indice+hop)
+        positions2.append(indice + hop)
         sampled_indices += sampled
     
     positions1 = torch.stack(positions1).to(batch_ids.device)
@@ -30,23 +31,22 @@ def condition_stapled(batch_ids,mask_generate):
     # control the type of K 
     guidance_node_attr = torch.zeros((mask_generate.shape[0], 20)).to(mask_generate.device)
     one_hot_vector = torch.zeros(20).to(mask_generate.device)
-    one_hot_vector[16] = 1 # K
+    one_hot_vector[12] = 1 # K
     one_hot_vector = one_hot_vector.unsqueeze(0).repeat(len(positions1),1)
     guidance_node_attr[positions1] = one_hot_vector
 
     # control the type of D/E
     one_hot_vector = torch.zeros(20).to(mask_generate.device)
     if hop == 3:
-        one_hot_vector[12] = 1 # D
+        one_hot_vector[8] = 1 # D
     elif hop == 4:
-        one_hot_vector[15] = 1 # E
+        one_hot_vector[11] = 1 # E
     one_hot_vector = one_hot_vector.unsqueeze(0).repeat(len(positions2),1)
     guidance_node_attr[positions2] = one_hot_vector
 
     edges = torch.stack([positions1, positions2], dim=0)
     reversed_edges = edges.flip(0)
     sampled_edges = torch.cat([edges,reversed_edges], dim=1)
-
     return guidance_node_attr, sampled_edges
 
 
@@ -54,7 +54,9 @@ def condition_head2tail(batch_ids, mask_generate):
     '''
     The distance of head and tail is less than 6 A
     '''
-    atom_full = torch.zeros((mask_generate.shape[0], 20)).to(mask_generate.device)
+    
+    # No type constraint
+    guidance_node_attr = torch.zeros((mask_generate.shape[0], 20)).to(mask_generate.device)
 
     head_positions = []
     tail_positions = []
@@ -74,7 +76,46 @@ def condition_head2tail(batch_ids, mask_generate):
     
     sampled_edges = torch.cat([sampled_ht_edges, reversed_edges], dim=1)
     
-    return atom_full, sampled_edges
+    return guidance_node_attr, sampled_edges
+
+
+def condition_disulfide(batch_ids, mask_generate):
+    '''
+    two positions Cys with distance between 3.5-5 A
+    '''
+    unique_vals = torch.unique(batch_ids)
+    sampled_indices = []
+    positions1 = []
+    positions2 = []
+    for val in unique_vals:
+        valid_indices = (batch_ids == val) & mask_generate
+        indices = valid_indices.nonzero(as_tuple=True)[0]
+        
+        if len(indices)<4:
+            continue
+        head_indices = indices[(max(indices)-indices>=3)]
+        head_indice = random.choice(head_indices)
+        sampled = [head_indice, head_indice+3]
+        positions1.append(head_indice)
+        positions2.append(head_indice+ 3 )
+        sampled_indices += sampled
+
+    sampled_indices = torch.tensor(sampled_indices).to(mask_generate.device)
+    guidance_node_attr = torch.zeros((mask_generate.shape[0], 20)).to(mask_generate.device)
+    one_hot_vector = torch.zeros(20).to(mask_generate.device)
+    one_hot_vector[16] = 1 # S
+    one_hot_vector = one_hot_vector.unsqueeze(0).repeat(len(sampled_indices),1)
+    guidance_node_attr[sampled_indices] = one_hot_vector
+
+    positions1 = torch.stack(positions1)
+    positions2 = torch.stack(positions2)
+    edges = torch.stack([positions1, positions2], dim=0)
+    reversed_edges = edges.flip(0)
+
+    sampled_edges = torch.cat([edges, reversed_edges], dim=1)
+   
+    return guidance_node_attr, sampled_edges
+
 
 
 def condition11(self,atom_gt,batch_ids,mask_generate,X_true,atom_mask):

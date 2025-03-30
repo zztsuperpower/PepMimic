@@ -11,7 +11,7 @@ from torch_scatter import scatter_mean
 
 from utils.nn_utils import variadic_meshgrid
 
-from .sample_utils import condition_stapled, condition_head2tail
+from .sample_utils import condition_stapled, condition_head2tail, condition_disulfide
 from .transition import construct_transition
 from .vlb import normal_kl, mean_flat, discretized_gaussian_log_likelihood
 
@@ -22,6 +22,7 @@ from ...dyMEAN.modules.radial_basis import RadialBasis
 SAMPLE_METHODS = {
     "KD": condition_stapled,
     "head2tail": condition_head2tail,
+    'disulfide': condition_disulfide
 }
 
 
@@ -230,10 +231,11 @@ class FullDPM(nn.Module):
             inner_positions = mask_generate & shifted_tensor  
             inner_positions = torch.nonzero(inner_positions).squeeze()
 
-            if inner_positions is None:
+            try:
+                groups = find_consecutive_groups(inner_positions)
+            except:
                 continue 
-
-            groups = find_consecutive_groups(inner_positions)
+            
             sampled_numbers = sample_from_groups(groups)
 
             if len(sampled_numbers)==0:
@@ -347,10 +349,13 @@ class FullDPM(nn.Module):
         if hasattr(self, 'dist_rbf'):
             ctx_edge_attr = self._get_edge_dist(self._unnormalize_position(X_noisy, centers, batch_ids, L), ctx_edges, atom_mask)
             inter_edge_attr = self._get_edge_dist(self._unnormalize_position(X_noisy, centers, batch_ids, L), inter_edges, atom_mask)
-            guidance_edge_attr = self._get_edge_dist(X_0, guidance_edges, atom_mask)
             ctx_edge_attr = self.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
             inter_edge_attr = self.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
-            guidance_edge_attr = self.guidance_dist_rbf(guidance_edge_attr).view(guidance_edges.shape[1], -1)   
+            if guidance_edges is not None:
+                guidance_edge_attr = self._get_edge_dist(X_0, guidance_edges, atom_mask)
+                guidance_edge_attr = self.guidance_dist_rbf(guidance_edge_attr).view(guidance_edges.shape[1], -1)  
+            else:
+                 guidance_edge_attr = None
         else:
             ctx_edge_attr, inter_edge_attr, guidance_edge_attr = None, None, None
 
@@ -358,19 +363,28 @@ class FullDPM(nn.Module):
         sampled_indices = self._sample_random_nodes(batch_ids, mask_generate)
         guidance_node_attr = torch.zeros(S.shape[0], 20).to(S.device)
         if len(sampled_indices) >= 1:
-            selected_AA = S[sampled_indices]
+            selected_AA = S[sampled_indices]-4 #minus special tokens
             one_hot_encoded = F.one_hot(selected_AA, num_classes=20)
             one_hot_encoded = one_hot_encoded.float()
             guidance_node_attr[sampled_indices] = one_hot_encoded
+            
 
         # beta = self.trans_x.var_sched.betas[t][batch_ids] # [N]
         beta = self.trans_x.get_timestamp(t)[batch_ids]  # [N]
 
-        eps_H_pred, eps_X_pred = self.eps_net(
-            H_noisy, X_noisy, guidance_node_attr, guidance_edges, guidance_edge_attr,
-            position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
-            ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
-        )
+        if random.random() > 0.2:
+            eps_H_pred, eps_X_pred = self.eps_net(
+                H_noisy, X_noisy, guidance_node_attr, guidance_edges, guidance_edge_attr,
+                position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
+                ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
+            )
+        else:
+            guidance_node_attr = torch.zeros_like(guidance_node_attr)
+            eps_H_pred, eps_X_pred = self.eps_net(
+                H_noisy, X_noisy, guidance_node_attr, None, None,
+                position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
+                ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
+            )            
 
         if return_states:
             return {
@@ -454,6 +468,7 @@ class FullDPM(nn.Module):
             process_func = SAMPLE_METHODS.get(specific_sample_condition)
             guidance_node_attr, guidance_edges = process_func(batch_ids, mask_generate)
 
+
     
         # traj = {self.num_steps: (self._unnormalize_position(X_init, centers, batch_ids, L), H_init)}
         traj = {self.num_steps: (X_init, H_init)}
@@ -477,11 +492,13 @@ class FullDPM(nn.Module):
                 ctx_edge_attr = self._get_edge_dist(self._unnormalize_position(X_t, centers, batch_ids, L), ctx_edges, atom_mask)
                 inter_edge_attr = self._get_edge_dist(self._unnormalize_position(X_t, centers, batch_ids, L), inter_edges, atom_mask)
                 guidance_edge_attr = self._get_edge_dist(X_t, guidance_edges, atom_mask)
+                guidance_edge_attr.fill_(4.5) 
                 ctx_edge_attr = self.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
                 inter_edge_attr = self.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
                 guidance_edge_attr = self.guidance_dist_rbf(guidance_edge_attr).view(guidance_edges.shape[1], -1)   
             else:
-                ctx_edge_attr, inter_edge_attr, guidance_edge_attr = None, None
+                ctx_edge_attr, inter_edge_attr, guidance_edge_attr = None, None, None
+
 
             # with guidance
             w_eps_H, w_eps_X = self.eps_net(
@@ -491,16 +508,17 @@ class FullDPM(nn.Module):
             )
 
             # without guidance
-            guidance_node_attr = torch.zeros_like(guidance_node_attr)
+            guidance_node_attr_zero = torch.zeros_like(guidance_node_attr)
             eps_H, eps_X = self.eps_net(
-                H_t, X_t, guidance_node_attr, None, None,
+                H_t, X_t, guidance_node_attr_zero, None, None,
                 position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
                 ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
             )
 
+
             # perform cfg guidance
-            eps_H = (1 + self.w) * w_eps_H - self.w*eps_H
-            eps_X = (1 + self.w) * w_eps_X - self.w*eps_X
+            eps_H = (1 + self.w) * w_eps_H - self.w * eps_H
+            eps_X = (1 + self.w) * w_eps_X - self.w * eps_X
             
 
             if energy_func is not None:
