@@ -11,6 +11,7 @@ from multiprocessing import Pool
 import yaml
 import torch
 from torch.utils.data import DataLoader
+import ray
 
 import models
 from models.LDM.ldm import LDMPepDesign
@@ -22,6 +23,19 @@ from data import create_dataloader, create_dataset
 from utils.logger import print_log
 from utils.random_seed import setup_seed
 from utils.const import sidechain_atoms
+
+from relaxer import ForceFieldMinimizer, ForceFieldMinimizerKtoDE, ForceFieldMinimizerHeadTail
+
+
+@ray.remote(num_cpus=1, num_gpus=1/16)
+def openmm_relax(pdb_path, cyclic_chain):
+    try:
+        out_path = pdb_path[:-4] + '_relaxed' + '.pdb'
+        force_field = ForceFieldMinimizerHeadTail()
+        force_field(pdb_path, out_path, cyclic_chains=[cyclic_chain])
+        return pdb_path
+    except:
+        return ''
 
 
 def get_best_ckpt(ckpt_dir):
@@ -159,8 +173,12 @@ def main(args, opt_args):
     model.to(device)
     model.eval()
 
+    # print(model.ldm.diffusion)
+
+
     # adjust the strength of text gudiance
     model.diffusion.w = config['guidance_strength']
+    print('model.diffusion.w', model.diffusion.w)
 
     # load data
     _, _, test_set = create_dataset(config['dataset'])
@@ -176,10 +194,14 @@ def main(args, opt_args):
     for directory in [ref_save_dir, cand_save_dir]:
         if not os.path.exists(directory):
             os.makedirs(directory)
+
+    
     
 
     fout = open(os.path.join(save_dir, 'results.jsonl'), 'w')
     item_idx = 0
+    all_pdbs = []
+    all_lig_chains = []
 
     # multiprocessing
     pool = Pool(args.n_cpu)
@@ -215,11 +237,25 @@ def main(args, opt_args):
                 
                 results = pool.starmap(save_data, inputs)
                 for result in results:
+                    all_pdbs.append(result['gen_pdb'])
+                    all_lig_chains.append(result['lig_chain'])
                     fout.write(json.dumps(result) + '\n')
                 
                 pbar.update(1)
+    
 
     fout.close()
+    if args.relax:
+        print_log(f'Running openmm relaxation...')
+        ray.init(num_cpus=8)
+        futures = [openmm_relax.remote(path, lig_chain) for path, lig_chain in zip(all_pdbs, all_lig_chains)]
+        pbar = tqdm(total=len(futures))
+        while len(futures) > 0:
+            done_ids, futures = ray.wait(futures, num_returns=1)
+            for done_id in done_ids:
+                done_path = ray.get(done_id)
+                pbar.update(1)
+        print_log(f'Done')
 
 
 def parse():
@@ -230,6 +266,8 @@ def parse():
 
     parser.add_argument('--gpu', type=int, default=0, help='GPU to use, -1 for cpu')
     parser.add_argument('--n_cpu', type=int, default=4, help='Number of CPU to use (for parallelly saving the generated results)')
+    parser.add_argument('--relax', type=bool, default=False, help='whether use openmm relaxation')
+
     return parser.parse_known_args()
 
 
