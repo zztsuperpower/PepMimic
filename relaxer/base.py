@@ -31,6 +31,8 @@ class ForceFieldMinimizer(object):
 
     def _fix(self, pdb_str, cyclic_chains, cyclic_opts):
         fixer = pdbfixer.PDBFixer(pdbfile=io.StringIO(pdb_str))
+        force_field = openmm_app.ForceField("/home/ztzhang/PepMimic/relaxer/custom/ff14SB.xml", custom_xml) # referring to http://docs.openmm.org/latest/userguide/application/02_running_sims.html
+
         fixer.findNonstandardResidues()
         fixer.replaceNonstandardResidues()
 
@@ -38,6 +40,7 @@ class ForceFieldMinimizer(object):
         fixer.findMissingAtoms()
         fixer.addMissingAtoms(seed=0)
         fixer.addMissingHydrogens()
+        fixer.addMissingHydrogens(7.0, force_field)
 
 
         if cyclic_chains is not None:
@@ -67,8 +70,7 @@ class ForceFieldMinimizer(object):
     def _minimize(self, pdb_str):
         pdb = openmm_app.PDBFile(io.StringIO(pdb_str))
 
-        force_field = openmm_app.ForceField("charmm36.xml", custom_xml) # referring to http://docs.openmm.org/latest/userguide/application/02_running_sims.html
-
+        force_field = openmm_app.ForceField("/home/ztzhang/PepMimic/relaxer/custom/ff14SB.xml", custom_xml) # referring to http://docs.openmm.org/latest/userguide/application/02_running_sims.html
         constraints = openmm_app.HBonds
         system = force_field.createSystem(pdb.topology, constraints=constraints)
 

@@ -4,7 +4,7 @@ from .dataset_wrapper import MixDatasetWrapper
 from .codesign import CoDesignDataset
 from .confidence import ConfidenceDataset, BalancedConfidenceDataset
 from .resample import ClusterResampler
-from .mimicry import MimicryDataset
+from .mimicry import CyclicDataset
 from .extend import ExtendDataset
 
 

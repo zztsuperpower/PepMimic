@@ -29,13 +29,14 @@ def parse():
     # config
     parser.add_argument('--config', type=str, required=True, help='Path to the yaml configure')
     parser.add_argument('--seed', type=int, default=SEED, help='Random seed')
-    parser.add_argument('--load_ckpt', type=str, help='load_ckpt')
+    parser.add_argument('--load_ckpt', default=None, type=str, help='load_ckpt')
 
     return parser.parse_known_args()
 
 
 def load_ckpt(model, ckpt):
     trained_model = torch.load(ckpt, map_location='cpu')
+    print(f'Load ckpt {ckpt}')
     model.load_state_dict(trained_model.state_dict())
     return model
 
@@ -48,8 +49,10 @@ def main(args, opt_args):
 
     ########## define your model #########
     model = R.construct(config['model'])
-    if 'load_ckpt' in config:
-        model = load_ckpt(model, config['load_ckpt'])
+
+    # if 'load_ckpt' in config:
+    if args.load_ckpt:
+        model = load_ckpt(model, args.load_ckpt)
 
     ########### load your train / valid set ###########
     train_set, valid_set, _ = create_dataset(config['dataset'])

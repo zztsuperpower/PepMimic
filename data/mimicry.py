@@ -100,8 +100,10 @@ def scan(ref_dir, full_ligand=False) -> List[Complex]:
     return summaries
 
 
-@R.register('MimicryDataset')
-class MimicryDataset(torch.utils.data.Dataset):
+
+ 
+@R.register('CyclicDataset')
+class CyclicDataset(torch.utils.data.Dataset):
     
     MAX_N_ATOM = 14
     
@@ -178,19 +180,12 @@ class MimicryDataset(torch.utils.data.Dataset):
             raise IndexError('Out of range')
         cplx = self.complexes[idx % len(self.complexes)]
         cplx.check_interface()
-
-        ref_item = cplx.get_cache_data()
-        if ref_item is None:
-            ref_item = self._form_data(cplx.rec_blocks, cplx.lig_blocks)
-            cplx.set_cache_data(ref_item)
         gen_len = self.sample_lengths[idx]
         pep_placeholder = [Block(
             'CYS', [Atom('CA', [0, 0, 0], 'C')], (i + 1, ' ')
         ) for i in range(gen_len)]
         item = self._form_data(cplx.rec_blocks, pep_placeholder)
 
-        for key in ref_item:
-            item['ref_' + key] = ref_item[key]
 
         return item
 
@@ -209,89 +204,9 @@ class MimicryDataset(torch.utils.data.Dataset):
         return results
     
 
-@R.register('PDBDataset')
-class PDBDataset(torch.utils.data.Dataset):
-    def __init__(self, summary_list):
-        super().__init__()
-        '''
-        Args:
-            summary_list: list of (file_path, receptor_chains, ligand_chains)
-        '''
-        self.complexes = [
-            Complex(get_filename(file_path), file_path, rec_chains, lig_chains)
-            for file_path, rec_chains, lig_chains in summary_list
-        ]
-
-    def __getitem__(self, idx):
-        cplx = self.complexes[idx]
-        cplx.check_interface(full_ligand=True)
-
-        item = cplx.get_cache_data()
-        if item is None:
-            for i, block in enumerate(cplx.lig_blocks):
-                block.id = (i + 1, ' ')
-            item = MimicryDataset._form_data(cplx.rec_blocks, cplx.lig_blocks)
-            cplx.set_cache_data(item)
-        
-        return item
-
-    def __len__(self):
-        return len(self.complexes)
-
-    @classmethod
-    def collate_fn(self, batch):
-        return MimicryDataset.collate_fn(batch)
-
-@R.register('PDBConfDataset')
-class PDBConfDataset(torch.utils.data.Dataset):
-    def __init__(self, summary_list):
-        super().__init__()
-        '''
-        Args:
-            summary_list: list of (file_path, receptor_chains, ligand_chains)
-        '''
-        self.complexes = [
-            Complex(get_filename(file_path), file_path, rec_chains, lig_chains)
-            for file_path, rec_chains, lig_chains in summary_list
-        ]
-
-    def __getitem__(self, idx):
-        cplx = self.complexes[idx]
-        cplx.check_interface(full_ligand=True)
-
-        item = cplx.get_cache_data()
-        if item is None:
-            for i, block in enumerate(cplx.lig_blocks):
-                block.id = (i + 1, ' ')
-            # item = MimicryDataset._form_data(cplx.rec_blocks, cplx.lig_blocks)
-            item = blocks_to_data_simple(cplx.rec_blocks, cplx.lig_blocks)
-            cplx.set_cache_data(item)
-        
-        return item
-
-    def __len__(self):
-        return len(self.complexes)
-
-    @classmethod
-    def collate_fn(cls, batch):
-        results = {
-            'X': torch.cat([torch.tensor(item['X'], dtype=torch.float) for item in batch], dim=0),
-            'B': torch.cat([torch.tensor(item['B'], dtype=torch.long) for item in batch], dim=0),
-            'A': torch.cat([torch.tensor(item['A'], dtype=torch.long) for item in batch], dim=0),
-            'atom_positions': torch.cat([torch.tensor(item['atom_positions'], dtype=torch.long) for item in batch], dim=0),
-            'block_lengths': torch.cat([torch.tensor(item['block_lengths'], dtype=torch.long) for item in batch], dim=0),
-            'segment_ids': torch.cat([torch.tensor(item['segment_ids'], dtype=torch.long) for item in batch], dim=0),
-            'lengths': torch.tensor([len(item['B']) for item in batch], dtype=torch.long),
-            'label': torch.cat([torch.tensor([0.0], dtype=torch.float) for item in batch], dim=0), # fake label
-        }
-
-        results['X'] = results['X'].unsqueeze(-2)  # number of channel is 1
-        return results
-
-
 if __name__ == '__main__':
     import sys
-    dataset = MimicryDataset(sys.argv[1], 5, 10, 12)
+    dataset = CyclicDataset(sys.argv[1], 5, 10, 12)
     print(len(dataset))
 
     for i, item in enumerate(dataset):
