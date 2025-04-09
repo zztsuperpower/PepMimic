@@ -2,7 +2,7 @@
 
 ## run design for phage14mer cyclic peptide
 ```bash
-nohup python api/cyc_design.py \
+ python api/cyc_design.py \
  --config example_data/7DHA/config.yaml \
  --ckpt ckpts/LDM_codesign/finetune_dropout_04/version_0/checkpoint/epoch129_step22100.ckpt \
  --gpu 0 \
