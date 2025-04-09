@@ -1,0 +1,16 @@
+dataset:
+  test:
+    class: CyclicDataset
+    ref_dir: ./example_data/7DHA  # relative path rooted at the project folder
+    n_sample_per_cplx: 10000      # number of generations for each reference complex
+    length_lb: 6                 # lower bound of peptide length (inclusive)
+    length_ub:                # uppper bound of peptide length (inclusive)
+
+dataloader:
+  num_workers: 4
+  batch_size: 32                  # If the GPU is out of memory, please try to reduce the batch size
+
+
+guidance_strength: 2
+sample_opt:
+  specific_sample_condition: phage14mer
