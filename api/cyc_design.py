@@ -13,6 +13,7 @@ import yaml
 import torch
 from torch.utils.data import DataLoader
 
+from rdkit import Chem
 import models
 from utils.config_utils import overwrite_values
 from data.converter.pdb_to_list_blocks import pdb_to_list_blocks
@@ -22,17 +23,19 @@ from data import create_dataloader, create_dataset
 from utils.logger import print_log
 from utils.random_seed import setup_seed
 from utils.const import sidechain_atoms
-from relaxer import ForceFieldMinimizerPhage14mer
+from relaxer import ForceFieldMinimizer
 
 
 @ray.remote(num_cpus=1, num_gpus=1/16)
 def openmm_relax(pdb_path, cyclic_chain='Y', cyclic_opts=[('Y', 0), ('Y', 13)]):
     try:
         out_path = pdb_path[:-4] + '_relaxed' + '.pdb'
-        force_field = ForceFieldMinimizerPhage14mer()
-        force_field(pdb_path, out_path, cyclic_chains=[cyclic_chain], cyclic_opts=cyclic_opts)
+        force_field = ForceFieldMinimizer()
+        force_field(pdb_path, out_path)
+        # force_field(pdb_path, out_path, cyclic_chains=[cyclic_chain], cyclic_opts=cyclic_opts)
         return out_path
-    except:
+    except Exception as e:
+        print(e)
         return ''
 
 
@@ -161,6 +164,39 @@ def save_data(
             'gen_seq': gen_seq
     }
 
+from Bio.PDB import PDBParser, Select, PDBIO
+import os
+from rdkit.Chem import rdShapeHelpers
+
+def compare_shared_shape(peptide_pdb_path, lig_chain, mol_ref):
+
+    """使用Biopython提取指定链并保存为PDB"""
+    output_peptide_file = peptide_pdb_path[:-4] +  '_peptide.pdb'
+    class ChainSelector(Select):
+        def __init__(self, chain_id):
+            self.chain_id = chain_id  # 初始化时传入链ID
+        
+        def accept_chain(self, chain):
+            return chain.id == self.chain_id  # 比较当前链与目标链ID
+
+    parser = PDBParser()
+    structure = parser.get_structure("complex", peptide_pdb_path)
+    
+    # 保存肽链到临时文件
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(output_peptide_file, ChainSelector(lig_chain))
+
+    mol_peptide = Chem.MolFromPDBFile(output_peptide_file, sanitize=False, removeHs=False)
+
+    overlap_score = rdShapeHelpers.ShapeTverskyIndex(
+    mol_ref, 
+    mol_peptide, 
+    alpha=0.8,  # 调整 alpha, beta 控制权重
+    beta=0.2
+    )
+    
+    return overlap_score
 
 def main(args, opt_args):
 
@@ -198,8 +234,13 @@ def main(args, opt_args):
 
     fout = open(os.path.join(save_dir, 'results.jsonl'), 'w')
     item_idx = 0
-    all_pdbs = []
-    all_lig_chains = []
+
+    if args.ref_sdf:
+        small_mol_sdf = args.ref_sdf 
+        mol_ref = Chem.MolFromMolFile(small_mol_sdf, sanitize=False, removeHs=False)
+    else:
+        mol_ref = None
+        
 
     # multiprocessing
     pool = Pool(args.n_cpu)
@@ -241,26 +282,44 @@ def main(args, opt_args):
                 ))
                 item_idx += 1
             
+            all_pdbs = []
+            all_lig_chains = []
             results = pool.starmap(save_data, inputs)
             for result in results:
+                # 序列满足特定约束
+                peptide = result['gen_seq']
+                # if peptide == 'IYPWPNYWSYYGWC':
+                # if (peptide[0:3] == 'NGL' and peptide[-1] == 'C'):
                 all_pdbs.append(result['gen_pdb'])
                 all_lig_chains.append(result['lig_chain'])
+                if mol_ref:
+                    shared_shape = compare_shared_shape(result['gen_pdb'], result['lig_chain'], mol_ref)
+                    print(shared_shape)
+                    result['shared_shape'] = shared_shape
                 fout.write(json.dumps(result) + '\n')
                 fout.flush()
             
+
+            
+            print(f'\n seq satisfied rate {len(all_pdbs)/len(results)}')
+            if args.relax:
+                print_log(f'Running openmm relaxation...')
+                ray.init(num_cpus=8)
+                futures = [openmm_relax.remote(path, lig_chain) for path, lig_chain in zip(all_pdbs, all_lig_chains)]
+                pbar = tqdm(total=len(futures))
+                while len(futures) > 0:
+                    done_ids, futures = ray.wait(futures, num_returns=1)
+                    for done_id in done_ids:
+                        done_path = ray.get(done_id)
+                        pbar.update(1)
+                print_log(f'Done')
+                ray.shutdown()
+
+
+            
     fout.close()
 
-    # if args.relax:
-    #     print_log(f'Running openmm relaxation...')
-    #     ray.init(num_cpus=8)
-    #     futures = [openmm_relax.remote(path, lig_chain) for path, lig_chain in zip(all_pdbs, all_lig_chains)]
-    #     pbar = tqdm(total=len(futures))
-    #     while len(futures) > 0:
-    #         done_ids, futures = ray.wait(futures, num_returns=1)
-    #         for done_id in done_ids:
-    #             done_path = ray.get(done_id)
-    #             pbar.update(1)
-    #     print_log(f'Done')
+
 
 
 
@@ -275,12 +334,14 @@ def parse():
 
     parser.add_argument('--gpu', type=int, default=0, help='GPU to use, -1 for cpu')
     parser.add_argument('--n_cpu', type=int, default=4, help='Number of CPU to use (for parallelly saving the generated results)')
-    parser.add_argument('--relax', type=bool, default=False, help='whether use openmm relaxation')
+    parser.add_argument('--ref_sdf', type=str, default='', help='ref_sdf')
+    parser.add_argument('--relax', type=bool, default=True, help='whether use openmm relaxation')
     return parser.parse_known_args()
 
 
 if __name__ == '__main__':
     args, opt_args = parse()
     print_log(f'Overwritting args: {opt_args}')
-    setup_seed(12)
+    # setup_seed(12)
+    setup_seed(16)
     main(args, opt_args)

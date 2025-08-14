@@ -11,7 +11,7 @@ from torch_scatter import scatter_mean
 
 from utils.nn_utils import variadic_meshgrid
 
-from .sample_utils import condition_stapled, condition_head2tail, condition_disulfide, condition_phage14mer
+from .sample_utils import condition_stapled, condition_head2tail, condition_disulfide, condition_phage14mer, condition_tnfrpep
 from .transition import construct_transition
 from .vlb import normal_kl, mean_flat, discretized_gaussian_log_likelihood
 
@@ -23,7 +23,8 @@ SAMPLE_METHODS = {
 	"KD": condition_stapled,
 	"head2tail": condition_head2tail,
 	'disulfide': condition_disulfide,
-	'phage14mer': condition_phage14mer
+	'phage14mer': condition_phage14mer,
+	'tnfrpep': condition_tnfrpep
 }
 
 
@@ -41,6 +42,14 @@ def vb_coefficient(transition, t):
 	m1_alpha_bar_t = 1.0 - transition.var_sched.alpha_bars[t]
 	return 0.5 * beta_t ** 2 / (sigma_t ** 2 * alpha_t * m1_alpha_bar_t)
 
+
+@torch.no_grad()
+def length_to_batch_id(lengths):
+    # generate batch id
+    batch_id = torch.zeros(lengths.sum(), dtype=torch.long, device=lengths.device) # [N]
+    batch_id[torch.cumsum(lengths, dim=0)[:-1]] = 1
+    batch_id.cumsum_(dim=0)  # [N], item idx in the batch
+    return batch_id
 
 class EpsilonNet(nn.Module):
 
@@ -266,6 +275,154 @@ class FullDPM(nn.Module):
 		return augmented_edges 
 
 
+	# @staticmethod
+	# @torch.no_grad()
+	# def _sample_condition_edges_by_distance(mask_generate, X_0):
+	# 	'''
+	# 	sample edges for cfg training
+	# 	Sample edges proportionally to inverse distance within each block
+	# 	Args:
+	# 		mask_generate: Boolean array of shape [N,]
+	# 		example: F, F, F, T, T, T, F, F, T, F, T, T
+	# 		X_0: coords
+	# 	Returns:
+	# 		Array of shape [num_edges, 2] containing sampled edge pairs
+	# 	'''
+
+	# 	def find_contiguous_true_blocks(mask_generate):
+	# 		"""
+	# 		Identify contiguous blocks of True values in the mask
+	# 		Args:
+	# 			mask_generate: Boolean array of shape [N,]
+	# 			example: F, F, F, T, T, T, F, F, T, F, T, T
+	# 		Returns:
+	# 			List of arrays, each containing indices of one contiguous True block
+	# 		"""
+	# 		# Find where the mask changes from False to True (rising edges)
+	# 		changes = torch.diff(mask_generate.astype(int))
+	# 		starts = torch.where(changes == 1)[0] + 1  # +1 because diff shifts indices
+	# 		ends = torch.where(changes == -1)[0] + 1
+	# 		ends = torch.cat((ends, len(mask_generate)-1))
+	# 		assert len(starts) == len(ends)
+
+
+	# 		# Extract all contiguous True blocks
+	# 		true_blocks = [np.arange(start, end) for start, end in zip(starts, ends) if mask_generate[start]]
+	# 		return true_blocks
+				
+
+	# 	def compute_block_distances(X, true_blocks):
+	# 		"""
+	# 		Compute pairwise distances within each contiguous True block
+	# 		Args:
+	# 			X: Coordinate array of shape [N, 3]
+	# 			true_blocks: List of contiguous True block indices
+	# 		Returns:
+	# 			all_dist_matrices: List of distance matrices for each block
+	# 			all_indices: List of original indices for each block
+	# 		"""
+			
+	# 		all_dist_matrices = []
+	# 		all_indices = []
+			
+	# 		for block in true_blocks:
+	# 			block_indices = torch.as_tensor(block)
+	# 			X_block = X[block_indices]
+				
+	# 			# Compute pairwise differences: [M, M, 3] where M is block size
+	# 			diff = X_block.unsqueeze(1) - X_block.unsqueeze(0)
+	# 			# Compute Euclidean distance: sqrt(sum(squared differences))
+	# 			dist_matrix = torch.sqrt(torch.sum(diff ** 2, dim=2))
+				
+	# 			# Set diagonal to infinity to avoid self-loops
+	# 			dist_matrix.fill_diagonal_(float('inf'))
+				
+	# 			all_dist_matrices.append(dist_matrix)
+	# 			all_indices.append(block_indices)
+			
+	# 		return all_dist_matrices, all_indices
+		
+		
+	# 	# Identify contiguous True blocks
+	# 	true_blocks = find_contiguous_true_blocks(mask_generate)
+	
+	# 	# Compute distances within each block
+	# 	all_dist_matrices, all_indices = compute_block_distances(X_0, true_blocks)
+
+	# 	# Calculate sampling weights for each block (sum of inverse distances)
+	# 	block_weights = []
+	# 	for dist_matrix in all_dist_matrices:
+	# 		inv_dist = 1.0 / dist_matrix
+	# 		block_weights.append(torch.sum(inv_dist))
+	# 	total_weight = sum(block_weights)
+    # 	block_probs = [w / total_weight for w in block_weights]
+    # 	block_counts = np.random.multinomial(num_edges, block_probs)		
+	# 	edges = []
+	# 	for dist_matrix, indices, count in zip(all_dist_matrices, all_indices, block_counts):
+	# 		if count == 0:
+	# 			continue
+			
+	# 		# Calculate sampling probabilities within this block
+	# 		inv_dist = 1.0 / dist_matrix
+	# 		prob_matrix = inv_dist / torch.sum(inv_dist)
+			
+	# 		# Flatten and sample
+	# 		flat_prob = prob_matrix.flatten()
+	# 		sampled_indices = torch.multinomial(flat_prob, count, replacement=True)
+			
+	# 		# Convert flat indices to matrix coordinates
+	# 		M = dist_matrix.size(0)
+	# 		row_indices = sampled_indices // M
+	# 		col_indices = sampled_indices % M
+			
+	# 		# Map back to original indices
+	# 		block_edges = torch.stack([
+	# 			indices[row_indices],
+	# 			indices[col_indices]
+	# 		], dim=1)
+			
+	# 		edges.append(block_edges)
+		
+	# 	for k in range(2, 7, 1): # we consider distance constraint from A*A to A*****A
+	# 		shifted_tensor = torch.roll(mask_generate, shifts=-k)  
+	# 		shifted_tensor[-k:] = False
+	# 		inner_positions = mask_generate & shifted_tensor  
+	# 		inner_positions = torch.nonzero(inner_positions).squeeze()
+
+	# 		try:
+	# 			groups = find_consecutive_groups(inner_positions)
+	# 		except:
+	# 			continue 
+			
+	# 		sampled_numbers = sample_from_groups(groups)
+
+	# 		if len(sampled_numbers)==0:
+	# 			continue
+
+	# 		inner_positions1 = []
+	# 		inner_positions2 = []
+	# 		for sampled_number in sampled_numbers:
+	# 			if sampled_number+k > len(mask_generate)-1:
+	# 				continue
+	# 			inner_positions1.append(sampled_number)
+	# 			inner_positions2.append(sampled_number+k)
+
+	# 		inner_positions1 = torch.stack(inner_positions1)
+	# 		inner_positions2 = torch.stack(inner_positions2)
+	# 		inner_edges = torch.stack([inner_positions1, inner_positions2], dim=0)
+	# 		reversed_inner_edges = inner_edges.flip(0)
+
+	# 		sampled_edges.append(inner_edges)
+	# 		sampled_edges.append(reversed_inner_edges)
+		
+	# 	try:
+	# 		augmented_edges = torch.cat(sampled_edges, dim=1)
+	# 	except:
+	# 		return None
+
+	# 	return augmented_edges 
+	
+
 	@staticmethod
 	@torch.no_grad()
 	def _sample_random_nodes(batch_ids, mask_generate):
@@ -344,7 +501,7 @@ class FullDPM(nn.Module):
 			H_noisy, eps_H = self.trans_h.add_noise(H_0, mask_generate, batch_ids, t)
 		else:
 			H_noisy, eps_H = H_0, torch.zeros_like(H_0)
-
+	
 		ctx_edges, inter_edges, guidance_edges = self._get_edges(mask_generate, batch_ids, lengths)
 
 		if hasattr(self, 'dist_rbf'):
@@ -356,7 +513,7 @@ class FullDPM(nn.Module):
 				guidance_edge_attr = self._get_edge_dist(X_0, guidance_edges, atom_mask)
 				guidance_edge_attr = self.guidance_dist_rbf(guidance_edge_attr).view(guidance_edges.shape[1], -1)  
 			else:
-				 guidance_edge_attr = None
+				guidance_edge_attr = None
 		else:
 			ctx_edge_attr, inter_edge_attr, guidance_edge_attr = None, None, None
 
@@ -493,7 +650,7 @@ class FullDPM(nn.Module):
 				ctx_edge_attr = self._get_edge_dist(self._unnormalize_position(X_t, centers, batch_ids, L), ctx_edges, atom_mask)
 				inter_edge_attr = self._get_edge_dist(self._unnormalize_position(X_t, centers, batch_ids, L), inter_edges, atom_mask)
 				guidance_edge_attr = self._get_edge_dist(X_t, guidance_edges, atom_mask)
-				guidance_edge_attr.fill_(4.5) 
+				guidance_edge_attr.fill_(0.5) 
 				ctx_edge_attr = self.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
 				inter_edge_attr = self.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
 				guidance_edge_attr = self.guidance_dist_rbf(guidance_edge_attr).view(guidance_edges.shape[1], -1)   
@@ -638,6 +795,88 @@ class FullDPM(nn.Module):
 		# otherwise return KL(q(x_{t-1}|x_t,x_0) || p(x_{t-1}|x_t))
 		output = torch.where((t == 0), decoder_nll, kl)
 		return output
+	
+
+    # used in likelihoods calculation
+	def perform_single_step_diffusion(
+		self,
+		h_t,
+        x_t, 
+		position_embedding,
+        t,
+        mask_generate,
+        lengths,
+		atom_embeddings,
+		atom_mask,
+		L,
+		sample_structure=True, 
+		sample_sequence=True,
+        energy_func=None, 
+		energy_lambda=0.01,
+		guide_mask=None, 
+		specific_sample_condition=None
+        ):
+		'''
+        for computing likelihood, get reverse ODE traj
+        '''
+		batch_ids = length_to_batch_id(lengths)
+		# perform sampling
+		if specific_sample_condition == None:
+			pass
+		elif specific_sample_condition not in SAMPLE_METHODS.keys():
+			raise NotImplementedError(f"Sampling methods {specific_sample_condition} not implemented!")
+		else:
+			process_func = SAMPLE_METHODS.get(specific_sample_condition)
+			guidance_node_attr, guidance_edges = process_func(batch_ids, mask_generate)
+
+
+		
+		
+		x_t, centers = self._normalize_position(x_t, batch_ids, mask_generate, atom_mask, L)
+		beta = self.trans_x.get_timestamp(t).view(1).repeat(x_t.shape[0])
+
+		t_tensor = torch.full([x_t.shape[0], ], fill_value=t, dtype=torch.long, device=x_t.device)
+
+		ctx_edges, inter_edges = self._get_edges(mask_generate, batch_ids, lengths, sample_random_edges=False)
+
+		if hasattr(self, 'dist_rbf'):
+			ctx_edge_attr = self._get_edge_dist(self._unnormalize_position(x_t, centers, batch_ids, L), ctx_edges, atom_mask)
+			inter_edge_attr = self._get_edge_dist(self._unnormalize_position(x_t, centers, batch_ids, L), inter_edges, atom_mask)
+			guidance_edge_attr = self._get_edge_dist(x_t, guidance_edges, atom_mask)
+			guidance_edge_attr.fill_(0.5) 
+			ctx_edge_attr = self.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
+			inter_edge_attr = self.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
+			guidance_edge_attr = self.guidance_dist_rbf(guidance_edge_attr).view(guidance_edges.shape[1], -1)   
+		else:
+			ctx_edge_attr, inter_edge_attr, guidance_edge_attr = None, None, None
+
+
+		# with guidance
+		w_eps_H, w_eps_X = self.eps_net(
+			h_t, x_t, guidance_node_attr, guidance_edges, guidance_edge_attr,
+			position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
+			ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
+		)
+
+		# without guidance
+		guidance_node_attr_zero = torch.zeros_like(guidance_node_attr)
+		eps_H, eps_X = self.eps_net(
+			h_t, x_t, guidance_node_attr_zero, None, None,
+			position_embedding, ctx_edges, inter_edges, atom_embeddings, atom_mask.float(), mask_generate, beta,
+			ctx_edge_attr=ctx_edge_attr, inter_edge_attr=inter_edge_attr,
+		)
+
+
+		# perform cfg guidance
+		eps_H = (1 + self.w) * w_eps_H - self.w * eps_H
+		eps_X = (1 + self.w) * w_eps_X - self.w * eps_X
+	
+
+		assert eps_H.requires_grad and eps_X.requires_grad, "Gradient chain broken!"
+		return eps_H, eps_X 
+
+
+
 
 	@torch.no_grad()
 	def cal_confidence(self, H_0, X_0, position_embedding, mask_generate, lengths, atom_embeddings, atom_mask, L=None, sample_structure=True, sample_sequence=True):
